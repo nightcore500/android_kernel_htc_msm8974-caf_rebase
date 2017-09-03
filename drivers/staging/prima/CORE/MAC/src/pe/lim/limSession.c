@@ -1,5 +1,25 @@
 /*
- * Copyright (c) 2012-2014 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
+ *
+ * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
+ *
+ *
+ * Permission to use, copy, modify, and/or distribute this software for
+ * any purpose with or without fee is hereby granted, provided that the
+ * above copyright notice and this permission notice appear in all
+ * copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+ * WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
+ * AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL
+ * DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
+ * PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+ * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+ * PERFORMANCE OF THIS SOFTWARE.
+ */
+/*
+ * Copyright (c) 2012, The Linux Foundation. All rights reserved.
  *
  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
  *
@@ -19,12 +39,6 @@
  * PERFORMANCE OF THIS SOFTWARE.
  */
 
-/*
- * This file was originally distributed by Qualcomm Atheros, Inc.
- * under proprietary terms before Copyright ownership was assigned
- * to the Linux Foundation.
- */
-
 /**=========================================================================
   
   \file  limSession.c
@@ -33,6 +47,9 @@
 
   \author Sunit Bhatia
   
+   Copyright 2008 (c) Qualcomm, Incorporated.  All Rights Reserved.
+   
+   Qualcomm Confidential and Proprietary.
   
   ========================================================================*/
 
@@ -44,8 +61,8 @@
 #include "limDebug.h"
 #include "limSession.h"
 #include "limUtils.h"
-#if defined(FEATURE_WLAN_ESE) && !defined(FEATURE_WLAN_ESE_UPLOAD)
-#include "eseApi.h"
+#if defined(FEATURE_WLAN_CCX) && !defined(FEATURE_WLAN_CCX_UPLOAD)
+#include "ccxApi.h"
 #endif
 
 /*--------------------------------------------------------------------------
@@ -101,6 +118,7 @@ void peInitBeaconParams(tpAniSirGlobal pMac, tpPESession psessionEntry)
 tpPESession peCreateSession(tpAniSirGlobal pMac, tANI_U8 *bssid , tANI_U8* sessionId, tANI_U16 numSta)
 {
     tANI_U8 i;
+	limLog(pMac, LOGE, FL(" create a new session a session BSSID: *:%02x:%02x:%02x"),bssid[3],bssid[4],bssid[5]);
     for(i =0; i < pMac->lim.maxBssId; i++)
     {
         /* Find first free room in session table */
@@ -109,24 +127,20 @@ tpPESession peCreateSession(tpAniSirGlobal pMac, tANI_U8 *bssid , tANI_U8* sessi
             vos_mem_set((void*)&pMac->lim.gpSession[i], sizeof(tPESession), 0);
 
             //Allocate space for Station Table for this session.
-            pMac->lim.gpSession[i].dph.dphHashTable.pHashTable = vos_mem_vmalloc(
+            pMac->lim.gpSession[i].dph.dphHashTable.pHashTable = vos_mem_malloc(
                                                   sizeof(tpDphHashNode)*numSta);
             if ( NULL == pMac->lim.gpSession[i].dph.dphHashTable.pHashTable )
             {
-                limLog(pMac, LOGE, FL("memory allocate for size %lu failed!"),
-                            (long unsigned int) sizeof(tpDphHashNode)*numSta);
+                limLog(pMac, LOGE, FL("memory allocate failed!"));
                 return NULL;
             }
 
-            pMac->lim.gpSession[i].dph.dphHashTable.pDphNodeArray = vos_mem_vmalloc(
+            pMac->lim.gpSession[i].dph.dphHashTable.pDphNodeArray = vos_mem_malloc(
                                                        sizeof(tDphHashNode)*numSta);
             if ( NULL == pMac->lim.gpSession[i].dph.dphHashTable.pDphNodeArray )
             {
-                limLog(pMac, LOGE, FL("memory allocate failed for Node array"
-                                                               "of size %lu"),
-                             (long unsigned int) sizeof(tDphHashNode)*numSta);
-                vos_mem_vfree(pMac->lim.gpSession[i].dph.dphHashTable.pHashTable);
-                pMac->lim.gpSession[i].dph.dphHashTable.pHashTable = NULL;
+                limLog(pMac, LOGE, FL("memory allocate failed!"));
+                vos_mem_free(pMac->lim.gpSession[i].dph.dphHashTable.pHashTable);
                 return NULL;
             }
             pMac->lim.gpSession[i].dph.dphHashTable.size = numSta;
@@ -134,17 +148,13 @@ tpPESession peCreateSession(tpAniSirGlobal pMac, tANI_U8 *bssid , tANI_U8* sessi
             dphHashTableClassInit(pMac, 
                            &pMac->lim.gpSession[i].dph.dphHashTable);
 
-            pMac->lim.gpSession[i].gpLimPeerIdxpool = vos_mem_vmalloc(sizeof(
+            pMac->lim.gpSession[i].gpLimPeerIdxpool = vos_mem_malloc(sizeof(
                                 *pMac->lim.gpSession[i].gpLimPeerIdxpool) * (numSta+1));
             if ( NULL == pMac->lim.gpSession[i].gpLimPeerIdxpool )
             {
-                limLog(pMac, LOGE, FL("memory allocate failed "
-                "for peerId pool of size %lu!"), (long unsigned int)
-                sizeof(*pMac->lim.gpSession[i].gpLimPeerIdxpool) * (numSta+1));
-                vos_mem_vfree(pMac->lim.gpSession[i].dph.dphHashTable.pHashTable);
-                vos_mem_vfree(pMac->lim.gpSession[i].dph.dphHashTable.pDphNodeArray);
-                pMac->lim.gpSession[i].dph.dphHashTable.pHashTable = NULL;
-                pMac->lim.gpSession[i].dph.dphHashTable.pDphNodeArray = NULL;
+                PELOGE(limLog(pMac, LOGE, FL("memory allocate failed!"));)
+                vos_mem_free(pMac->lim.gpSession[i].dph.dphHashTable.pHashTable);
+                vos_mem_free(pMac->lim.gpSession[i].dph.dphHashTable.pDphNodeArray);
                 return NULL;
             }
             vos_mem_set(pMac->lim.gpSession[i].gpLimPeerIdxpool,
@@ -166,11 +176,11 @@ tpPESession peCreateSession(tpAniSirGlobal pMac, tANI_U8 *bssid , tANI_U8* sessi
             pMac->lim.gpSession[i].is11Rconnection = FALSE;
 #endif
 
-#ifdef FEATURE_WLAN_ESE
-            pMac->lim.gpSession[i].isESEconnection = FALSE;
+#ifdef FEATURE_WLAN_CCX
+            pMac->lim.gpSession[i].isCCXconnection = FALSE;
 #endif
 
-#if defined WLAN_FEATURE_VOWIFI_11R || defined FEATURE_WLAN_ESE || defined(FEATURE_WLAN_LFR)
+#if defined WLAN_FEATURE_VOWIFI_11R || defined FEATURE_WLAN_CCX || defined(FEATURE_WLAN_LFR)
             pMac->lim.gpSession[i].isFastTransitionEnabled = FALSE;
 #endif
 #ifdef FEATURE_WLAN_LFR
@@ -186,18 +196,14 @@ tpPESession peCreateSession(tpAniSirGlobal pMac, tANI_U8 *bssid , tANI_U8* sessi
 #ifdef FEATURE_WLAN_TDLS
             vos_mem_set(pMac->lim.gpSession[i].peerAIDBitmap,
                   sizeof(pMac->lim.gpSession[i].peerAIDBitmap), 0);
-            pMac->lim.gpSession[i].tdlsChanSwitProhibited = 0;
 #endif
             pMac->lim.gpSession[i].fWaitForProbeRsp = 0;
             pMac->lim.gpSession[i].fIgnoreCapsChange = 0;
-            limLog(pMac, LOG1, FL("Create a new sessionId (%d) with BSSID: "
-               MAC_ADDRESS_STR " Max No. of STA %d"),
-               pMac->lim.gpSession[i].peSessionId,
-               MAC_ADDR_ARRAY(bssid), numSta);
+			limLog(pMac, LOGE, FL(" created session = %d "),(int)pMac->lim.gpSession[i].peSessionId);
             return(&pMac->lim.gpSession[i]);
         }
     }
-    limLog(pMac, LOGE, FL("Session can not be created.. Reached Max permitted sessions "));
+    limLog(pMac, LOGE, FL("Session can not be created.. Reached Max permitted sessions \n "));
     return NULL;
 }
 
@@ -230,7 +236,7 @@ tpPESession peFindSessionByBssid(tpAniSirGlobal pMac,  tANI_U8*  bssid,    tANI_
         }
     }
 
-    limLog(pMac, LOG4, FL("Session lookup fails for BSSID: "));
+    limLog(pMac, LOG4, FL("Session lookup fails for BSSID: \n "));
     limPrintMacAddr(pMac, bssid, LOG4);
     return(NULL);
 
@@ -279,13 +285,14 @@ tpPESession peFindSessionByBssIdx(tpAniSirGlobal pMac,  tANI_U8 bssIdx)
 {
     if(sessionId >=  pMac->lim.maxBssId)
     {
-        limLog(pMac, LOGE, FL("Invalid sessionId: %d "), sessionId);
+        limLog(pMac, LOGE, FL("Invalid sessionId: %d \n "), sessionId);
         return(NULL);
     }
     if((pMac->lim.gpSession[sessionId].valid == TRUE))
     {
         return(&pMac->lim.gpSession[sessionId]);
     }
+    limLog(pMac, LOG1, FL("Session %d  not active\n "), sessionId);
     return(NULL);
 
 }
@@ -346,12 +353,9 @@ void peDeleteSession(tpAniSirGlobal pMac, tpPESession psessionEntry)
     tANI_U16 i = 0;
     tANI_U16 n;
     TX_TIMER *timer_ptr;
-    eHalStatus lock_status = eHAL_STATUS_SUCCESS;
 
-    limLog(pMac, LOGW, FL("Trying to delete a session %d Opmode %d BssIdx %d"
-           " BSSID: " MAC_ADDRESS_STR), psessionEntry->peSessionId,
-           psessionEntry->operMode, psessionEntry->bssIdx,
-           MAC_ADDR_ARRAY(psessionEntry->bssId));
+    limLog(pMac, LOGE, FL("Trying to delete a session %d. BSSID: *:%02x:%02x:%02x"), psessionEntry->peSessionId, 
+    psessionEntry->bssId[3], psessionEntry->bssId[4], psessionEntry->bssId[5]);
 
     for (n = 0; n < pMac->lim.maxStation; n++)
     {
@@ -365,19 +369,8 @@ void peDeleteSession(tpAniSirGlobal pMac, tpPESession psessionEntry)
             }
         }
     }
-
-#ifdef WLAN_FEATURE_11AC
-
-    /* Unblock the MuBF for other session if the MuBf session is deleted
-     */
-    if(psessionEntry->txMuBformee)
-    {
-        pMac->isMuBfsessionexist = FALSE;
-    }
-
-#endif
-
-    if (psessionEntry->pLimStartBssReq != NULL)
+    
+    if(psessionEntry->pLimStartBssReq != NULL)
     {
         vos_mem_free( psessionEntry->pLimStartBssReq );
         psessionEntry->pLimStartBssReq = NULL;
@@ -401,26 +394,21 @@ void peDeleteSession(tpAniSirGlobal pMac, tpPESession psessionEntry)
         psessionEntry->pLimMlmJoinReq = NULL;
     }
 
-    lock_status =  pe_AcquireGlobalLock(&pMac->lim);
-    if (eHAL_STATUS_SUCCESS == lock_status)
+    if(psessionEntry->dph.dphHashTable.pHashTable != NULL)
     {
-         if (psessionEntry->dph.dphHashTable.pHashTable != NULL)
-         {
-             vos_mem_vfree(psessionEntry->dph.dphHashTable.pHashTable);
-             psessionEntry->dph.dphHashTable.pHashTable = NULL;
-         }
+        vos_mem_free(psessionEntry->dph.dphHashTable.pHashTable);
+        psessionEntry->dph.dphHashTable.pHashTable = NULL;
     }
-    pe_ReleaseGlobalLock(&pMac->lim);
 
     if(psessionEntry->dph.dphHashTable.pDphNodeArray != NULL)
     {
-        vos_mem_vfree(psessionEntry->dph.dphHashTable.pDphNodeArray);
+        vos_mem_free(psessionEntry->dph.dphHashTable.pDphNodeArray);
         psessionEntry->dph.dphHashTable.pDphNodeArray = NULL;
     }
 
     if(psessionEntry->gpLimPeerIdxpool != NULL)
     {
-        vos_mem_vfree(psessionEntry->gpLimPeerIdxpool);
+        vos_mem_free(psessionEntry->gpLimPeerIdxpool);
         psessionEntry->gpLimPeerIdxpool = NULL;
     }
 
@@ -471,7 +459,7 @@ void peDeleteSession(tpAniSirGlobal pMac, tpPESession psessionEntry)
         psessionEntry->limAssocResponseData = NULL;
     }
 
-#if  defined (WLAN_FEATURE_VOWIFI_11R) || defined (FEATURE_WLAN_ESE) || defined(FEATURE_WLAN_LFR)
+#if  defined (WLAN_FEATURE_VOWIFI_11R) || defined (FEATURE_WLAN_CCX) || defined(FEATURE_WLAN_LFR)
     if (NULL != psessionEntry->pLimMlmReassocRetryReq)
     {
         vos_mem_free( psessionEntry->pLimMlmReassocRetryReq);
@@ -485,8 +473,8 @@ void peDeleteSession(tpAniSirGlobal pMac, tpPESession psessionEntry)
         psessionEntry->pLimMlmReassocReq = NULL;
     }
 
-#if defined(FEATURE_WLAN_ESE) && !defined(FEATURE_WLAN_ESE_UPLOAD)
-    limCleanupEseCtxt(pMac, psessionEntry);
+#if defined(FEATURE_WLAN_CCX) && !defined(FEATURE_WLAN_CCX_UPLOAD)
+    limCleanupCcxCtxt(pMac, psessionEntry); 
 #endif
 
     psessionEntry->valid = FALSE;
@@ -529,7 +517,7 @@ tpPESession peFindSessionByPeerSta(tpAniSirGlobal pMac,  tANI_U8*  sa,    tANI_U
       }
    }   
 
-   limLog(pMac, LOG1, FL("Session lookup fails for Peer StaId: "));
+   limLog(pMac, LOG1, FL("Session lookup fails for Peer StaId: \n "));
    limPrintMacAddr(pMac, sa, LOG1);
    return NULL;
 }
