@@ -205,6 +205,12 @@ config s5k4e1
 		and QSXGA snapshot at 15 fps.
 		This sensor driver does not support auto focus.
 
+config OV13850
+	bool "Sensor OV13850 (BAYER 13M)"
+	depends on MSMB_CAMERA
+	---help---
+	  Support for ov13850 sensor driver.
+
 config OV12830
 	bool "OmniVision OV12830 (BAYER 12MP)"
 	depends on MSMB_CAMERA
