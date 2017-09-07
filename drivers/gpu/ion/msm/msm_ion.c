@@ -783,7 +783,7 @@ out:
 	return ret;
 }
 
-static void msm_ion_get_heap_base(struct device_node *node,
+static int msm_ion_get_heap_base(struct device_node *node,
 				 struct ion_platform_heap *heap)
 {
 	u32 out_values[2];
@@ -795,13 +795,17 @@ static void msm_ion_get_heap_base(struct device_node *node,
 	if (!ret)
 		heap->base = out_values[0];
 
+  ret = 0;
 	pnode = of_parse_phandle(node, "linux,contiguous-region", 0);
 	if (pnode != NULL) {
-		heap->base = cma_get_base(heap->priv);
+    if (cma_area_exist(heap->priv))
+		  heap->base = cma_get_base(heap->priv);
+    else
+      ret = -ENOMEM; 
 		of_node_put(pnode);
 	}
 
-	return;
+	return ret;
 }
 
 static void msm_ion_get_heap_adjacent(struct device_node *node,
@@ -891,7 +895,11 @@ static struct ion_platform_data *msm_ion_parse_dt(struct platform_device *pdev)
 		if (ret)
 			goto free_heaps;
 
-		msm_ion_get_heap_base(node, &pdata->heaps[idx]);
+		ret = msm_ion_get_heap_base(node, &pdata->heaps[idx]);
+		if (ret) {
+			pr_err("%s: Unable to get valid base addr\n", __func__);
+			continue;
+		}
 		msm_ion_get_heap_align(node, &pdata->heaps[idx]);
 
 		ret = msm_ion_get_heap_size(node, &pdata->heaps[idx]);
@@ -902,6 +910,7 @@ static struct ion_platform_data *msm_ion_parse_dt(struct platform_device *pdev)
 
 		++idx;
 	}
+  pdata->nr = idx;
 	return pdata;
 
 free_heaps:
