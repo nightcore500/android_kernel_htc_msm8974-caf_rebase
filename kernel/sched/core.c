@@ -3886,6 +3886,12 @@ void __sched wait_for_completion_io(struct completion *x)
 }
 EXPORT_SYMBOL(wait_for_completion_io);
 
+unsigned long __sched
+wait_for_completion_io_timeout(struct completion *x, unsigned long timeout)
+{
+	return wait_for_common(x, timeout, TASK_UNINTERRUPTIBLE, 1);
+}
+
 
 /**
  * wait_for_completion_timeout: - waits for completion of a task (w/timeout)
