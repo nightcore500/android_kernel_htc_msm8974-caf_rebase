@@ -25,18 +25,16 @@
 #include <linux/input.h>
 #include <linux/workqueue.h>
 #include <linux/freezer.h>
+#include <mach/rt5506.h>
 #include <linux/mutex.h>
 #include <linux/debugfs.h>
 #include <linux/gpio.h>
 #include <linux/module.h>
+#include <mach/htc_headset_mgr.h>
 #include <linux/wakelock.h>
 #include <linux/jiffies.h>
 #include <linux/of_gpio.h>
 #include <mach/htc_acoustic_alsa.h>
-#include <mach/rt5506.h>
-#include <mach/htc_headset_mgr.h>
-
-#define BYPASS_MODE (0)
 
 #define DEBUG (1)
 #define AMP_ON_CMD_LEN 7
@@ -51,9 +49,12 @@ enum AMP_REG_MODE {
 	REG_AUTO_MODE,
 };
 
-enum AMP_CHIP_NAME {
-	RT55XX_06 = 0,
-	RT55XX_07,
+enum AMP_POWER_MASK {
+	POWER_PLAYBACK = 0,
+	POWER_IMPEDANCE,
+	POWER_CMDLINE_TOOL,
+	POWER_HIGH_IMP_RESET,
+	POWER_MASK_MAX,
 };
 
 struct headset_query {
@@ -63,9 +64,9 @@ struct headset_query {
 	struct wake_lock hs_wake_lock;
 	struct wake_lock gpio_wake_lock;
 	enum HEADSET_QUERY_STATUS hs_qstatus;
-	enum RT55XX_STATUS rt5506_status;
+	enum AMP_STATUS rt5506_status;
 	enum HEADSET_OM headsetom;
-	enum RT55XX_Mode curmode;
+	enum PLAYBACK_MODE curmode;
 	enum AMP_GPIO_STATUS gpiostatus;
 	enum AMP_REG_MODE regstatus;
 	int action_on;
@@ -73,96 +74,50 @@ struct headset_query {
 	struct mutex actionlock;
 	struct delayed_work volume_ramp_work;
 	struct delayed_work gpio_off_work;
+	int hs_connec;
+#ifdef CONFIG_HTC_HEADSET_DET_DEBOUNCE
+       int hs_imp_over;
+#endif
+	unsigned long power_mask;
 };
 
 static struct i2c_client *this_client;
-static struct rt55xx_platform_data *pdata;
+static struct rt5506_platform_data *pdata;
 static int rt5506Connect = 0;
 
-struct rt55xx_config_data *rt55xx_config_data_ptr = NULL;
+struct rt5506_config_data rt5506_config_data;
 static struct mutex hp_amp_lock;
 static int rt5506_opened;
 static int last_spkamp_state;
-struct rt55xx_config RT5506_AMP_ON = {7,{{0x0,0xc0},{0x1,0x1c},{0x2,0x00},{0x7,0x7f},{0x9,0x1},{0xa,0x0},{0xb,0xc7},}};
-struct rt55xx_config RT5506_AMP_INIT = {11,{{0,0xc0},{0x81,0x30},{0x87,0xf6},{0x93,0x8d},{0x95,0x7d},{0xa4,0x52},\
+struct rt5506_config RT5506_AMP_ON = {7,{{0x0,0xc0},{0x1,0x1c},{0x2,0x00},{0x7,0x7f},{0x9,0x1},{0xa,0x0},{0xb,0xc7},}};
+struct rt5506_config RT5506_AMP_INIT = {11,{{0,0xc0},{0x81,0x30},{0x87,0xf6},{0x93,0x8d},{0x95,0x7d},{0xa4,0x52},\
                                         {0x96,0xae},{0x97,0x13},{0x99,0x35},{0x9b,0x68},{0x9d,0x68},}};
 
-struct rt55xx_config RT5506_AMP_MUTE = {1,{{0x1,0xC7},}};;
-struct rt55xx_config RT5506_AMP_OFF = {1,{{0x0,0x1},}};
+struct rt5506_config RT5506_AMP_MUTE = {1,{{0x1,0xC7},}};;
+struct rt5506_config RT5506_AMP_OFF = {1,{{0x0,0x1},}};
 
 static int rt5506_write_reg(u8 reg, u8 val);
 static void hs_imp_detec_func(struct work_struct *work);
 static int rt5506_i2c_read_addr(unsigned char *rxData, unsigned char addr);
-static int rt5506_i2c_write(struct rt55xx_reg_data *txData, int length);
-static void set_amp(int on, struct rt55xx_config *i2c_command);
+static int rt5506_i2c_write(struct rt5506_reg_data *txData, int length);
+static void set_amp(int on, struct rt5506_config *i2c_command);
 struct headset_query rt5506_query;
 static struct workqueue_struct *hs_wq;
 
 static struct workqueue_struct *ramp_wq;
 static struct workqueue_struct *gpio_wq;
 static int high_imp = 0;
-static int rt55xx_chip = RT55XX_06;
 
-static int check_rt55xx_chip(void)
+#ifdef CONFIG_HTC_HEADSET_DET_DEBOUNCE
+int query_imp_over_threshold(void)
 {
-	unsigned char chip_rev;
-	int ret;
-
-	ret = rt5506_i2c_read_addr(&chip_rev,0xc0);
-	if (chip_rev == 0x02) {
-		pr_info("chip revision %d, is rt5507\n", chip_rev);
-		rt55xx_chip = RT55XX_07;
-	} else
-		pr_info("read revision %d, set as rt5506, ret %d\n",chip_rev, ret);
-
-    return ret;
+       int ret = 0;
+       mutex_lock(&rt5506_query.mlock);
+       ret = rt5506_query.hs_imp_over;
+       mutex_unlock(&rt5506_query.mlock);
+       return ret;
 }
-
-static int set_rt55xx_init(void)
-{
-
-	pr_info("%s:set set_rt550xx_init, rt55xx_chip %d\n",__func__,rt55xx_chip);
-
-	switch(rt55xx_chip) {
-		case RT55XX_07:
-			rt5506_write_reg(0x0,0xc0);
-			rt5506_write_reg(0x81,0x30);
-			rt5506_write_reg(0x87,0xea);
-			rt5506_write_reg(0x90,0xd0);
-			rt5506_write_reg(0x93,0x9d);
-			rt5506_write_reg(0x95,0x7b);
-			rt5506_write_reg(0xa4,0x52);
-			rt5506_write_reg(0x97,0x00);
-			rt5506_write_reg(0x98,0x22);
-			rt5506_write_reg(0x99,0x33);
-			rt5506_write_reg(0x9a,0x55);
-			rt5506_write_reg(0x9b,0x66);
-			rt5506_write_reg(0x9c,0x99);
-			rt5506_write_reg(0x9d,0x66);
-			rt5506_write_reg(0x9e,0x99);
-			rt5506_write_reg(0x90,0xd0);
-			break;
-		case RT55XX_06:
-		default: 
-			rt5506_write_reg(0x0,0xc0);
-			rt5506_write_reg(0x81,0x30);
-			rt5506_write_reg(0x87,0xea);
-			rt5506_write_reg(0x90,0xd0);
-			rt5506_write_reg(0x93,0x9d);
-			rt5506_write_reg(0x95,0x7b);
-			rt5506_write_reg(0xa4,0x52);
-			rt5506_write_reg(0x97,0x00);
-			rt5506_write_reg(0x98,0x22);
-			rt5506_write_reg(0x99,0x33);
-			rt5506_write_reg(0x9a,0x55);
-			rt5506_write_reg(0x9b,0x66);
-			rt5506_write_reg(0x9c,0x99);
-			rt5506_write_reg(0x9d,0x66);
-			rt5506_write_reg(0x9e,0x99);
-			break;
-    }
-    return 0;
-}
+#endif
 
 static int set_rt5506_regulator(enum AMP_REG_MODE mode)
 {
@@ -183,7 +138,45 @@ static int set_rt5506_regulator(enum AMP_REG_MODE mode)
 				break;
 		}
 	}
+
 	return 0;
+}
+
+static int need_power(unsigned long *addr)
+{
+	return (*addr != 0);
+}
+
+static void vote_power(unsigned long *addr, enum AMP_POWER_MASK bit)
+{
+	pr_info("%s: mask %d\n",__func__,bit);
+	set_bit(bit,addr);
+
+	if(need_power(addr) && rt5506_query.gpiostatus == AMP_GPIO_OFF) {
+		pr_info("%s: enable gpio %d\n",__func__,pdata->gpio_rt5506_enable);
+		if(rt5506_query.regstatus == REG_AUTO_MODE) {
+			set_rt5506_regulator(REG_PWM_MODE);
+			rt5506_query.regstatus = REG_PWM_MODE;
+			msleep(1);
+		}
+
+		gpio_set_value(pdata->gpio_rt5506_enable, 1);
+		rt5506_query.gpiostatus = AMP_GPIO_ON;
+		usleep_range(20000,20000);
+	}
+
+}
+
+static void unvote_power(unsigned long *addr, enum AMP_POWER_MASK bit)
+{
+	pr_info("%s: mask %d\n",__func__,bit);
+	clear_bit(bit,addr);
+
+	if(!need_power(addr) && rt5506_query.gpiostatus == AMP_GPIO_ON) {
+		rt5506_query.gpio_off_cancel = 0;
+		queue_delayed_work(gpio_wq, &rt5506_query.gpio_off_work, msecs_to_jiffies(0));
+	}
+
 }
 
 static int rt5506_headset_detect(void *private_data, int on)
@@ -193,15 +186,25 @@ static int rt5506_headset_detect(void *private_data, int on)
 		return 0;
 
 	if(on) {
+		mutex_lock(&rt5506_query.mlock);
+		if(rt5506_query.hs_connec) {
+			pr_info("%s: headset exist, ignore\n",__func__);
+			mutex_unlock(&rt5506_query.mlock);
+			return 0;
+		}
+		mutex_unlock(&rt5506_query.mlock);
 
 		pr_info("%s: headset in ++\n",__func__);
 		cancel_delayed_work_sync(&rt5506_query.hs_imp_detec_work);
 		mutex_lock(&rt5506_query.gpiolock);
 		mutex_lock(&rt5506_query.mlock);
-		rt5506_query.hs_qstatus = RT55XX_QUERY_HEADSET;
+		rt5506_query.hs_qstatus = QUERY_HEADSET;
 		rt5506_query.headsetom = HEADSET_OM_UNDER_DETECT;
 
-		if(rt5506_query.rt5506_status == RT55XX_PLAYBACK) {
+#ifdef CONFIG_HTC_HEADSET_DET_DEBOUNCE
+               rt5506_query.hs_imp_over = -EINVAL;
+#endif
+		if(rt5506_query.rt5506_status == STATUS_PLAYBACK) {
 
 			if(high_imp) {
 				rt5506_write_reg(1,0x7);
@@ -214,8 +217,9 @@ static int rt5506_headset_detect(void *private_data, int on)
 			last_spkamp_state = 0;
 			pr_info("%s: OFF\n", __func__);
 
-			rt5506_query.rt5506_status = RT55XX_SUSPEND;
+			rt5506_query.rt5506_status = STATUS_SUSPEND;
 		}
+		rt5506_query.hs_connec = 1;
 		pr_info("%s: headset in --\n",__func__);
 		mutex_unlock(&rt5506_query.mlock);
 		mutex_unlock(&rt5506_query.gpiolock);
@@ -225,12 +229,20 @@ static int rt5506_headset_detect(void *private_data, int on)
 
 	} else {
 
+		mutex_lock(&rt5506_query.mlock);
+		if(!rt5506_query.hs_connec) {
+			pr_info("%s: headset isn't exist, ignore\n",__func__);
+			mutex_unlock(&rt5506_query.mlock);
+			return 0;
+		}
+		mutex_unlock(&rt5506_query.mlock);
+
 		pr_info("%s: headset remove ++\n",__func__);
 		cancel_delayed_work_sync(&rt5506_query.hs_imp_detec_work);
-		flush_work(&rt5506_query.volume_ramp_work.work);
+		flush_work_sync(&rt5506_query.volume_ramp_work.work);
 		mutex_lock(&rt5506_query.gpiolock);
 		mutex_lock(&rt5506_query.mlock);
-		rt5506_query.hs_qstatus = RT55XX_QUERY_OFF;
+		rt5506_query.hs_qstatus = QUERY_OFF;
 		rt5506_query.headsetom = HEADSET_OM_UNDER_DETECT;
 
 		if(rt5506_query.regstatus == REG_AUTO_MODE) {
@@ -238,7 +250,7 @@ static int rt5506_headset_detect(void *private_data, int on)
 			rt5506_query.regstatus = REG_PWM_MODE;
 		}
 
-		if(rt5506_query.rt5506_status == RT55XX_PLAYBACK) {
+		if(rt5506_query.rt5506_status == STATUS_PLAYBACK) {
 
 			if(high_imp) {
 				rt5506_write_reg(1,0x7);
@@ -252,43 +264,22 @@ static int rt5506_headset_detect(void *private_data, int on)
 			last_spkamp_state = 0;
 			pr_info("%s: OFF\n", __func__);
 
-			rt5506_query.rt5506_status = RT55XX_SUSPEND;
+			rt5506_query.rt5506_status = STATUS_SUSPEND;
 		}
 
 		if(high_imp) {
-			int closegpio = 0;
-			if(rt5506_query.gpiostatus == AMP_GPIO_OFF) {
-				pr_info("%s: enable gpio %d\n", __func__, pdata->gpio_rt55xx_enable);
-				if(rt5506_query.regstatus == REG_AUTO_MODE) {
-					set_rt5506_regulator(REG_PWM_MODE);
-					rt5506_query.regstatus = REG_PWM_MODE;
-					msleep(1);
-				}
-
-				gpio_set_value(pdata->gpio_rt55xx_enable, 1);
-				closegpio = 1;
-				usleep_range(20000,20000);
-			}
+			vote_power(&rt5506_query.power_mask, POWER_HIGH_IMP_RESET);
 			pr_info("%s: reset rt5501\n",__func__);
 			rt5506_write_reg(0x0,0x4);
 			mdelay(1);
 
 			rt5506_write_reg(0x1,0xc7);
 			high_imp = 0;
-
-			if(closegpio) {
-				pr_info("%s: disable gpio %d\n", __func__, pdata->gpio_rt55xx_enable);
-				gpio_set_value(pdata->gpio_rt55xx_enable, 0);
-
-				if(rt5506_query.regstatus == REG_PWM_MODE) {
-					set_rt5506_regulator(REG_AUTO_MODE);
-					rt5506_query.regstatus = REG_AUTO_MODE;
-				}
-
-			}
+			unvote_power(&rt5506_query.power_mask, POWER_HIGH_IMP_RESET);
 		}
 
-		rt5506_query.curmode = RT55XX_MODE_OFF;
+		rt5506_query.curmode = PLAYBACK_MODE_OFF;
+		rt5506_query.hs_connec = 0;
 		pr_info("%s: headset remove --1\n",__func__);
 
 
@@ -304,10 +295,15 @@ static int rt5506_headset_detect(void *private_data, int on)
 
 static void rt5506_register_hs_notification(void)
 {
+#if 1
 	struct hs_notify_t notifier;
 	notifier.private_data = NULL;
 	notifier.callback_f = rt5506_headset_detect;
 	htc_acoustic_register_hs_notify(HS_AMP_N, &notifier);
+#else
+
+	rt5506_headset_detect(NULL,0);
+#endif
 }
 
 static int rt5506_write_reg(u8 reg, u8 val)
@@ -333,7 +329,7 @@ static int rt5506_write_reg(u8 reg, u8 val)
         }
 }
 
-static int rt5506_i2c_write(struct rt55xx_reg_data *txData, int length)
+static int rt5506_i2c_write(struct rt5506_reg_data *txData, int length)
 {
 	int i, retry, pass = 0;
 	char buf[2];
@@ -450,15 +446,16 @@ static void hs_imp_gpio_off(struct work_struct *work)
 	}
 
 	mutex_lock(&rt5506_query.gpiolock);
-	pr_info("%s: disable gpio %d\n", __func__, pdata->gpio_rt55xx_enable);
-	gpio_set_value(pdata->gpio_rt55xx_enable, 0);
-	rt5506_query.gpiostatus = AMP_GPIO_OFF;
+	if(!need_power(&rt5506_query.power_mask)) {
+		pr_info("%s: disable gpio %d\n",__func__,pdata->gpio_rt5506_enable);
+		gpio_set_value(pdata->gpio_rt5506_enable, 0);
+		rt5506_query.gpiostatus = AMP_GPIO_OFF;
 
-	if(rt5506_query.regstatus == REG_PWM_MODE) {
-		set_rt5506_regulator(REG_AUTO_MODE);
-		rt5506_query.regstatus = REG_AUTO_MODE;
+		if(rt5506_query.regstatus == REG_PWM_MODE) {
+			set_rt5506_regulator(REG_AUTO_MODE);
+			rt5506_query.regstatus = REG_AUTO_MODE;
+		}
 	}
-
 	mutex_unlock(&rt5506_query.gpiolock);
 	wake_unlock(&rt5506_query.gpio_wake_lock);
 }
@@ -479,27 +476,14 @@ static void hs_imp_detec_func(struct work_struct *work)
 	mutex_lock(&hs->gpiolock);
 	mutex_lock(&hs->mlock);
 
-	if(hs->hs_qstatus != RT55XX_QUERY_HEADSET) {
+	if(hs->hs_qstatus != QUERY_HEADSET) {
 		mutex_unlock(&hs->mlock);
 		mutex_unlock(&hs->gpiolock);
 		wake_unlock(&hs->hs_wake_lock);
 		return;
 	}
 
-
-	if(hs->gpiostatus == AMP_GPIO_OFF) {
-
-		if(rt5506_query.regstatus == REG_AUTO_MODE) {
-			set_rt5506_regulator(REG_PWM_MODE);
-			rt5506_query.regstatus = REG_PWM_MODE;
-			msleep(1);
-		}
-		pr_info("%s: enable gpio %d\n", __func__, pdata->gpio_rt55xx_enable);
-		gpio_set_value(pdata->gpio_rt55xx_enable, 1);
-		rt5506_query.gpiostatus = AMP_GPIO_ON;
-	}
-
-	usleep_range(20000,20000);
+	vote_power(&rt5506_query.power_mask, POWER_IMPEDANCE);
 
 	rt5506_write_reg(0,0x04);
 	rt5506_write_reg(0xa4,0x52);
@@ -514,12 +498,7 @@ static void hs_imp_detec_func(struct work_struct *work)
 	if(ret < 0) {
 		pr_err("%s: read rt5506 status error %d\n",__func__,ret);
 
-		if(hs->gpiostatus == AMP_GPIO_ON) {
-
-			rt5506_query.gpio_off_cancel = 0;
-			queue_delayed_work(gpio_wq, &rt5506_query.gpio_off_work, msecs_to_jiffies(0));
-		}
-
+		unvote_power(&rt5506_query.power_mask, POWER_IMPEDANCE);
 		mutex_unlock(&hs->mlock);
 		mutex_unlock(&hs->gpiolock);
 		wake_unlock(&hs->hs_wake_lock);
@@ -529,7 +508,7 @@ static void hs_imp_detec_func(struct work_struct *work)
 	rt5506_i2c_read_addr(&r_channel,0x6);
 	rt5506_write_reg(0x0,0x4);
 	mdelay(1);
-#if 0
+
 	rt5506_write_reg(0x0,0xc0);
 	rt5506_write_reg(0x81,0x30);
 	rt5506_write_reg(0x90,0xd0);
@@ -544,10 +523,7 @@ static void hs_imp_detec_func(struct work_struct *work)
 	rt5506_write_reg(0x9c,0x99);
 	rt5506_write_reg(0x9d,0x66);
 	rt5506_write_reg(0x9e,0x99);
-#else
-	check_rt55xx_chip();
-	set_rt55xx_init();
-#endif
+
 
 	high_imp = 0;
 
@@ -596,7 +572,7 @@ static void hs_imp_detec_func(struct work_struct *work)
 			}
 		}
 
-		hs->hs_qstatus = RT55XX_QUERY_FINISH;
+		hs->hs_qstatus = QUERY_FINISH;
 		hs->headsetom = hsom;
 
 		if(om >= HEADSET_256OM && om <= HEADSET_1KOM)
@@ -606,7 +582,7 @@ static void hs_imp_detec_func(struct work_struct *work)
 			temp[0] & 0xf,hsmode,om,hsom,r_channel,high_imp);
 	} else {
 
-		if(hs->hs_qstatus == RT55XX_QUERY_HEADSET)
+		if(hs->hs_qstatus == QUERY_HEADSET)
 			queue_delayed_work(hs_wq,&rt5506_query.hs_imp_detec_work,QUERY_LATTER);
 	}
 
@@ -628,17 +604,25 @@ static void hs_imp_detec_func(struct work_struct *work)
 		rt5506_write_reg(1,0xc7);
 	}
 
-	if(hs->gpiostatus == AMP_GPIO_ON) {
+	if(hs->rt5506_status == STATUS_PLAYBACK)
+		hs->rt5506_status = STATUS_SUSPEND;
 
-		rt5506_query.gpio_off_cancel = 0;
-		queue_delayed_work(gpio_wq, &rt5506_query.gpio_off_work, msecs_to_jiffies(0));
+#ifdef CONFIG_HTC_HEADSET_DET_DEBOUNCE
+       
+       if(hs->hs_qstatus == QUERY_FINISH) {
 
-	}
+               if(r_channel > 0x88)
+                       hs->hs_imp_over = 1;
+               else
+                       hs->hs_imp_over = 0;
+       }
+#endif
 
+	unvote_power(&rt5506_query.power_mask, POWER_IMPEDANCE);
 	mutex_unlock(&hs->mlock);
 	mutex_unlock(&hs->gpiolock);
 
-	if(hs->rt5506_status == RT55XX_SUSPEND)
+	if(hs->rt5506_status == STATUS_SUSPEND)
 		set_rt5506_amp(1,0);
 
 	wake_unlock(&hs->hs_wake_lock);
@@ -646,32 +630,31 @@ static void hs_imp_detec_func(struct work_struct *work)
 
 static void volume_ramp_func(struct work_struct *work)
 {
-
-	if(rt5506_query.rt5506_status != RT55XX_PLAYBACK) {
-
-		mdelay(1);
-		
-		if(high_imp)
-			rt5506_write_reg(0xb1,0x80);
-
-		rt5506_write_reg(0x2,0x0);
-		mdelay(1);
-	}
-
 	set_amp(1, &RT5506_AMP_ON);
 }
 
-static void set_amp(int on, struct rt55xx_config *i2c_command)
+static void set_amp(int on, struct rt5506_config *i2c_command)
 {
 	pr_info("%s: %d\n", __func__, on);
 	mutex_lock(&rt5506_query.mlock);
 	mutex_lock(&hp_amp_lock);
 
-	if(rt5506_query.hs_qstatus == RT55XX_QUERY_HEADSET)
-		rt5506_query.hs_qstatus = RT55XX_QUERY_FINISH;
+	if(rt5506_query.hs_qstatus == QUERY_HEADSET)
+		rt5506_query.hs_qstatus = QUERY_FINISH;
 
 	if (on) {
-		rt5506_query.rt5506_status = RT55XX_PLAYBACK;
+		if(rt5506_query.rt5506_status != STATUS_PLAYBACK) {
+
+			mdelay(1);
+			
+			if(high_imp)
+				rt5506_write_reg(0xb1,0x80);
+
+			rt5506_write_reg(0x2,0x0);
+			mdelay(1);
+		}
+
+		rt5506_query.rt5506_status = STATUS_PLAYBACK;
 		if (rt5506_i2c_write(i2c_command->reg, i2c_command->reg_len) == 0) {
 			last_spkamp_state = 1;
 			pr_info("%s: ON \n",__func__);
@@ -686,12 +669,12 @@ static void set_amp(int on, struct rt55xx_config *i2c_command)
 			rt5506_write_reg(1,0xc7);
 		}
 
-		if(rt5506_query.rt5506_status == RT55XX_PLAYBACK) {
+		if(rt5506_query.rt5506_status == STATUS_PLAYBACK) {
 			last_spkamp_state = 0;
 			pr_info("%s: OFF\n", __func__);
 		}
-		rt5506_query.rt5506_status = RT55XX_OFF;
-		rt5506_query.curmode = RT55XX_MODE_OFF;
+		rt5506_query.rt5506_status = STATUS_OFF;
+		rt5506_query.curmode = PLAYBACK_MODE_OFF;
 	}
 	mutex_unlock(&hp_amp_lock);
 	mutex_unlock(&rt5506_query.mlock);
@@ -718,31 +701,13 @@ static int set_rt5506_amp(int on, int dsp)
 	mutex_lock(&rt5506_query.gpiolock);
 
 	if(on) {
-
-		if(rt5506_query.gpiostatus == AMP_GPIO_OFF) {
-
-			if(rt5506_query.regstatus == REG_AUTO_MODE) {
-				set_rt5506_regulator(REG_PWM_MODE);
-				rt5506_query.regstatus = REG_PWM_MODE;
-				msleep(1);
-			}
-
-			pr_info("%s: enable gpio %d\n", __func__, pdata->gpio_rt55xx_enable);
-			gpio_set_value(pdata->gpio_rt55xx_enable, 1);
-			rt5506_query.gpiostatus = AMP_GPIO_ON;
-			usleep_range(20000,20000);
-		}
+		vote_power(&rt5506_query.power_mask, POWER_PLAYBACK);
 		rt5506_query.action_on = 1;
 		queue_delayed_work(ramp_wq, &rt5506_query.volume_ramp_work, msecs_to_jiffies(0));
 
 	} else {
 		set_amp(0, &RT5506_AMP_ON);
-		if(rt5506_query.gpiostatus == AMP_GPIO_ON) {
-
-			rt5506_query.gpio_off_cancel = 0;
-			queue_delayed_work(gpio_wq, &rt5506_query.gpio_off_work, msecs_to_jiffies(0));
-		}
-
+		unvote_power(&rt5506_query.power_mask, POWER_PLAYBACK);
 	}
 
 	mutex_unlock(&rt5506_query.gpiolock);
@@ -753,29 +718,23 @@ static int set_rt5506_amp(int on, int dsp)
 
 static int update_amp_parameter(int mode)
 {
-	if(rt55xx_config_data_ptr) {
+	if (mode >= rt5506_config_data.mode_num)
+		return -EINVAL;
 
-		if (mode >= rt55xx_config_data_ptr->mode_num) {
-			return -EINVAL;
-		}
+        pr_info("%s: set mode %d\n", __func__, mode);
 
-		pr_info("%s: set mode %d\n", __func__, mode);
-
-		if (mode == RT55XX_MODE_OFF) {
-			memcpy(&RT5506_AMP_OFF, &rt55xx_config_data_ptr->cmd_data[mode].config, sizeof(struct rt55xx_config));
-		}
-		else if (mode == RT55XX_INIT) {
-			memcpy(&RT5506_AMP_INIT, &rt55xx_config_data_ptr->cmd_data[mode].config, sizeof(struct rt55xx_config));
-		}
-		else if (mode == RT55XX_MUTE) {
-			memcpy(&RT5506_AMP_MUTE, &rt55xx_config_data_ptr->cmd_data[mode].config, sizeof(struct rt55xx_config));
-		}
-		else {
-			memcpy(&RT5506_AMP_ON, &rt55xx_config_data_ptr->cmd_data[mode].config, sizeof(struct rt55xx_config));
-		}
-	}
+	if (mode == PLAYBACK_MODE_OFF)
+		memcpy(&RT5506_AMP_OFF, &rt5506_config_data.cmd_data[mode].config,
+				sizeof(struct rt5506_config));
+	else if (mode == AMP_INIT)
+		memcpy(&RT5506_AMP_INIT, &rt5506_config_data.cmd_data[mode].config,
+				sizeof(struct rt5506_config));
+	else if (mode == AMP_MUTE)
+		memcpy(&RT5506_AMP_MUTE, &rt5506_config_data.cmd_data[mode].config,
+				sizeof(struct rt5506_config));
 	else {
-		pr_info("%s: rt55xx_config_data_ptr is NULL\n", __func__);
+		memcpy(&RT5506_AMP_ON, &rt5506_config_data.cmd_data[mode].config,
+				sizeof(struct rt5506_config));
 	}
 	return 0;
 }
@@ -785,227 +744,144 @@ static long rt5506_ioctl(struct file *file, unsigned int cmd,
 	   unsigned long arg)
 {
 	void __user *argp = (void __user *)arg;
-	int rc = 0;
+	int rc = 0, modeid = 0;
 	int premode = 0;
 	struct amp_ctrl ampctrl;
-	struct rt55xx_reg_data reg;
-	enum AMP_GPIO_STATUS curgpiostatus;
-
-	unsigned char *buf = NULL;
-	unsigned int us32_size = 0;
-	int s32_value = 0;
-
-	if ( (_IOC_TYPE(cmd) != ACOUSTIC_IOCTL_MAGIC) &&
-		(_IOC_TYPE(cmd) != RT55XX_IOCTL_MAGIC) ) {
-		return -ENOTTY;
-	}
-
-	us32_size = _IOC_SIZE(cmd);
-
-	buf = kzalloc(us32_size, GFP_KERNEL);
-
-	if (buf == NULL) {
-		pr_err("%s %d: allocate kernel buffer failed.\n", __func__, __LINE__);
-		return -EFAULT;
-	}
-
-	if (_IOC_DIR(cmd) & _IOC_WRITE) {
-		rc = copy_from_user(buf, argp, us32_size);
-		if (rc) {
-			pr_err("%s %d: copy_from_user fail.\n", __func__, __LINE__);
-			rc = -EFAULT;
-		}
-		else {
-			pr_err("%s %d: copy_from_user ok. size=%#x\n", __func__, __LINE__, us32_size);
-		}
-	}
+	struct rt5506_reg_data reg;
 
 	switch (cmd) {
-	case RT55XX_SET_MODE:
-#if BYPASS_MODE
-        return 0;
-#endif
-		if(sizeof(s32_value) <= us32_size) {
-			memcpy((void*)&s32_value, (void*)buf, sizeof(s32_value));
+	case AMP_SET_MODE:
+		if (copy_from_user(&modeid, argp, sizeof(modeid)))
+			return -EFAULT;
 
-			if (NULL == rt55xx_config_data_ptr) {
-				pr_err("%s: out of memory\n", __func__);
-				rc = -ENOMEM;
-				break;
-			}
+		if (!rt5506_config_data.cmd_data) {
+			pr_err("%s: out of memory\n", __func__);
+			return -ENOMEM;
+		}
 
-			if (s32_value >= rt55xx_config_data_ptr->mode_num || s32_value < 0) {
-				pr_err("unsupported rt5506 mode %d\n", s32_value);
-				rc = -EINVAL;
-				break;
-			}
-			mutex_lock(&hp_amp_lock);
-			premode = rt5506_query.curmode;
-			rt5506_query.curmode = s32_value;
-			rc = update_amp_parameter(s32_value);
-			mutex_unlock(&hp_amp_lock);
-			pr_info("%s:set rt5506 mode to %d curstatus %d\n", __func__, s32_value, rt5506_query.rt5506_status);
-			mutex_lock(&rt5506_query.actionlock);
-			if(rt5506_query.rt5506_status == RT55XX_PLAYBACK && premode != rt5506_query.curmode) {
-				flush_work(&rt5506_query.volume_ramp_work.work);
-				rt5506_query.action_on = 1;
-				queue_delayed_work(ramp_wq, &rt5506_query.volume_ramp_work, msecs_to_jiffies(280));
-			}
-			mutex_unlock(&rt5506_query.actionlock);
+		if (modeid >= rt5506_config_data.mode_num || modeid < 0) {
+			pr_err("unsupported rt5506 mode %d\n", modeid);
+			return -EINVAL;
 		}
-		else {
-			pr_err("%s: RT55XX_SET_MODE error! please check size!!!\n", __func__);
-			rc = -EINVAL;
-		}
-		break;
-	case RT55XX_SET_PARAM:
-#if BYPASS_MODE
-        return 0;
-#endif
 		mutex_lock(&hp_amp_lock);
-		if(sizeof(struct rt55xx_config_data) == us32_size) {
-
-			if (NULL == rt55xx_config_data_ptr) {
-				rt55xx_config_data_ptr = kzalloc(sizeof(struct rt55xx_config_data), GFP_KERNEL);
-			}
-
-			if (NULL == rt55xx_config_data_ptr) {
-				pr_err("%s: out of memory\n", __func__);
-				mutex_unlock(&hp_amp_lock);
-				rc = -ENOMEM;
-				break;
-			}
-
-			memcpy((void*)rt55xx_config_data_ptr, (void*)buf, sizeof(struct rt55xx_config_data));
-
-			pr_info("%s: update rt5506 i2c commands #%d success.\n",
-					__func__, rt55xx_config_data_ptr->mode_num);
-			
-			update_amp_parameter(RT55XX_MODE_OFF);
-			update_amp_parameter(RT55XX_MUTE);
-			update_amp_parameter(RT55XX_INIT);
-
-		}
-		else {
-			pr_err("%s: RT55XX_SET_PARAM error! us32_size= %#x\n", __func__, us32_size);
-			rc = -EINVAL;
-		}
+		premode = rt5506_query.curmode;
+		rt5506_query.curmode = modeid;
+		rc = update_amp_parameter(modeid);
 		mutex_unlock(&hp_amp_lock);
-
+		pr_info("%s:set rt5506 mode to %d curstatus %d\n", __func__,modeid,rt5506_query.rt5506_status);
+		mutex_lock(&rt5506_query.actionlock);
+		if(rt5506_query.rt5506_status == STATUS_PLAYBACK && premode != rt5506_query.curmode) {
+			flush_work_sync(&rt5506_query.volume_ramp_work.work);
+			rt5506_query.action_on = 1;
+			queue_delayed_work(ramp_wq, &rt5506_query.volume_ramp_work, msecs_to_jiffies(280));
+		}
+		mutex_unlock(&rt5506_query.actionlock);
 		break;
-	case RT55XX_QUERY_OM:
-		if(sizeof(s32_value) <= us32_size) {
-			mutex_lock(&rt5506_query.mlock);
-			s32_value = rt5506_query.headsetom;
-			mutex_unlock(&rt5506_query.mlock);
-			pr_info("%s: query headset om %d\n", __func__, s32_value);
+	case AMP_SET_PARAM:
+		mutex_lock(&hp_amp_lock);
+		if (copy_from_user(&rt5506_config_data.mode_num, argp, sizeof(unsigned int))) {
+			pr_err("%s: copy from user failed.\n", __func__);
+			mutex_unlock(&hp_amp_lock);
+			return -EFAULT;
+		}
 
-			memcpy((void*)buf, (void*)&s32_value, sizeof(s32_value));
+		if (rt5506_config_data.mode_num <= 0) {
+			pr_err("%s: invalid mode number %d\n",
+					__func__, rt5506_config_data.mode_num);
+			mutex_unlock(&hp_amp_lock);
+			return -EINVAL;
 		}
-		else {
-			pr_err("%s: RT55XX_QUERY_OM error!\n", __func__);
-			rc = -EINVAL;
+		if (rt5506_config_data.cmd_data == NULL)
+			rt5506_config_data.cmd_data = kzalloc(sizeof(struct rt5506_comm_data)*rt5506_config_data.mode_num, GFP_KERNEL);
+
+		if (!rt5506_config_data.cmd_data) {
+			pr_err("%s: out of memory\n", __func__);
+			mutex_unlock(&hp_amp_lock);
+			return -ENOMEM;
 		}
+
+		if (copy_from_user(rt5506_config_data.cmd_data, ((struct rt5506_config_data*)argp)->cmd_data \
+			,sizeof(struct rt5506_comm_data)*rt5506_config_data.mode_num)) {
+			pr_err("%s: copy data from user failed.\n", __func__);
+			kfree(rt5506_config_data.cmd_data);
+			rt5506_config_data.cmd_data = NULL;
+			mutex_unlock(&hp_amp_lock);
+			return -EFAULT;
+		}
+
+		pr_info("%s: update rt5506 i2c commands #%d success.\n",
+				__func__, rt5506_config_data.mode_num);
+		
+		update_amp_parameter(PLAYBACK_MODE_OFF);
+		update_amp_parameter(AMP_MUTE);
+		update_amp_parameter(AMP_INIT);
+		mutex_unlock(&hp_amp_lock);
+		rc = 0;
+		break;
+	case AMP_QUERY_OM:
+		mutex_lock(&rt5506_query.mlock);
+		rc = rt5506_query.headsetom;
+		mutex_unlock(&rt5506_query.mlock);
+		pr_info("%s: query headset om %d\n", __func__,rc);
+
+		if (copy_to_user(argp, &rc, sizeof(rc)))
+			rc = -EFAULT;
+		else
+			rc = 0;
 		break;
 	case ACOUSTIC_AMP_CTRL:
-		if(sizeof(struct amp_ctrl) <= us32_size) {
+		if (copy_from_user(&ampctrl, argp, sizeof(ampctrl)))
+			return -EFAULT;
 
-			memcpy((void*)&ampctrl, (void*)buf, sizeof(struct amp_ctrl));
+		if(!this_client)
+			return -EFAULT;
 
-			if(!this_client) {
-				pr_err("%s: ACOUSTIC_AMP_CTRL error! this_client is NULL!!!\n", __func__);
+		if(ampctrl.slave != AUD_AMP_SLAVE_ALL && ampctrl.slave != this_client->addr)
+			break;
+
+		mutex_lock(&rt5506_query.gpiolock);
+		mutex_lock(&rt5506_query.mlock);
+		mutex_lock(&hp_amp_lock);
+
+		rc = 0;
+		vote_power(&rt5506_query.power_mask, POWER_CMDLINE_TOOL);
+		if(ampctrl.ctrl == AMP_WRITE) {
+			reg.addr = (unsigned char)ampctrl.reg;
+			reg.val = (unsigned char)ampctrl.val;
+			rt5506_write_reg(reg.addr,reg.val);
+		} else if (ampctrl.ctrl == AMP_READ) {
+			reg.addr = (unsigned char)ampctrl.reg;
+			rt5506_i2c_read_addr(&reg.val, reg.addr);
+			ampctrl.val = (unsigned int)reg.val;
+
+			if (copy_to_user(argp, &ampctrl, sizeof(ampctrl)))
 				rc = -EFAULT;
-				break;
-			}
-
-			if(ampctrl.slave != AUD_AMP_SLAVE_ALL && ampctrl.slave != this_client->addr) {
-				pr_err("%s: ACOUSTIC_AMP_CTRL error! slave error!!!\n", __func__);
-				break;
-			}
-
-			mutex_lock(&rt5506_query.gpiolock);
-			mutex_lock(&rt5506_query.mlock);
-			mutex_lock(&hp_amp_lock);
-
-			rc = 0;
-			curgpiostatus = rt5506_query.gpiostatus;
-
-			if(rt5506_query.gpiostatus == AMP_GPIO_OFF) {
-
-				if(rt5506_query.regstatus == REG_AUTO_MODE) {
-					set_rt5506_regulator(REG_PWM_MODE);
-					rt5506_query.regstatus = REG_PWM_MODE;
-					msleep(1);
-				}
-
-				pr_info("%s: enable gpio %d\n", __func__, pdata->gpio_rt55xx_enable);
-						gpio_set_value(pdata->gpio_rt55xx_enable, 1);
-				usleep_range(20000,20000);
-			}
-
-			if(ampctrl.ctrl == AMP_WRITE) {
-				reg.addr = (unsigned char)ampctrl.reg;
-				reg.val = (unsigned char)ampctrl.val;
-				rt5506_write_reg(reg.addr,reg.val);
-			} else if (ampctrl.ctrl == AMP_READ) {
-				reg.addr = (unsigned char)ampctrl.reg;
-				rt5506_i2c_read_addr(&reg.val, reg.addr);
-				ampctrl.val = (unsigned int)reg.val;
-				memcpy((void*)buf, (void*)&ampctrl, sizeof(struct amp_ctrl));
-			}
-
-			if(curgpiostatus == AMP_GPIO_OFF) {
-				rt5506_query.gpio_off_cancel = 0;
-				queue_delayed_work(gpio_wq, &rt5506_query.gpio_off_work, msecs_to_jiffies(0));
-			}
-
-			mutex_unlock(&hp_amp_lock);
-			mutex_unlock(&rt5506_query.mlock);
-			mutex_unlock(&rt5506_query.gpiolock);
 		}
-		else {
-			pr_err("%s: ACOUSTIC_AMP_CTRL error! sizeof(struct amp_ctrl) is bigger than user_space\n", __func__);
-			rc = -EINVAL;
-		}
+		unvote_power(&rt5506_query.power_mask, POWER_CMDLINE_TOOL);
+		mutex_unlock(&hp_amp_lock);
+		mutex_unlock(&rt5506_query.mlock);
+		mutex_unlock(&rt5506_query.gpiolock);
 		break;
 	default:
 		pr_err("%s: Invalid command\n", __func__);
 		rc = -EINVAL;
 		break;
 	}
-
-	if(0 == rc) {
-		if (_IOC_DIR(cmd) & _IOC_READ) {
-			rc = copy_to_user(argp, buf, us32_size);
-			if (rc) {
-				pr_err("%s %d: copy_to_user fail.\n", __func__, __LINE__);
-				rc = -EFAULT;
-			}
-			else {
-				pr_info("%s %d: copy_to_user ok. size=%#x\n", __func__, __LINE__, us32_size);
-			}
-		}
-	}
-
-	kfree(buf);
-
 	return rc;
 }
 
-static int rt550_parse_pfdata(struct device *dev, struct rt55xx_platform_data *ppdata)
+static int rt550_parse_pfdata(struct device *dev, struct rt5506_platform_data *ppdata)
 {
 	struct device_node *dt = dev->of_node;
 	enum of_gpio_flags flags;
 	int ret;
 
-	pdata->gpio_rt55xx_enable = -EINVAL;
-	pdata->gpio_rt55xx_power = -EINVAL;
+	pdata->gpio_rt5506_enable = -EINVAL;
 	pdata->power_supply = NULL;
 	pdata->power_reg = NULL;
 
 	if (dt) {
-		pdata->gpio_rt55xx_enable = of_get_named_gpio_flags(dt,"richtek,enable-gpio",0, &flags);
-		pdata->gpio_rt55xx_power = of_get_named_gpio(dt,"richtek,power-gpio",0);
+		pdata->gpio_rt5506_enable = of_get_named_gpio_flags(dt,"richtek,enable-gpio",0, &flags);
 		ret = of_property_read_string(dt,"power_supply",&pdata->power_supply);
 
 		if(ret < 0) {
@@ -1015,26 +891,26 @@ static int rt550_parse_pfdata(struct device *dev, struct rt55xx_platform_data *p
 
 	} else {
 		if(dev->platform_data) {
-			pdata->gpio_rt55xx_enable = ((struct rt55xx_platform_data *)dev->platform_data)->gpio_rt55xx_enable;
-			pdata->gpio_rt55xx_power = ((struct rt55xx_platform_data *)dev->platform_data)->gpio_rt55xx_power;
-			pdata->power_supply = ((struct rt55xx_platform_data *)dev->platform_data)->power_supply;
+			pdata->gpio_rt5506_enable = ((struct rt5506_platform_data *)dev->platform_data)->gpio_rt5506_enable;
+			pdata->power_supply = ((struct rt5506_platform_data *)dev->platform_data)->power_supply;
 		}
 	}
 
-	pr_info("%s: rt5506 enable gpio %d, power gpio %d\n", __func__, pdata->gpio_rt55xx_enable, pdata->gpio_rt55xx_power);
+	pr_info("%s: rt5506 gpio %d\n",__func__,pdata->gpio_rt5506_enable);
 
 	if(pdata->power_supply)
 		pr_info("%s:power supply %s\n",__func__,pdata->power_supply);
 
 	if(pdata->power_supply != NULL) {
 		pdata->power_reg = rpm_regulator_get(NULL, pdata->power_supply);
+
 		if (IS_ERR(pdata->power_reg)) {
 			pdata->power_reg = NULL;
 			pr_err("%s: reqest regulator %s fail\n",__func__,pdata->power_supply);
 		}
 	}
 
-	if(gpio_is_valid(pdata->gpio_rt55xx_enable))
+	if(gpio_is_valid(pdata->gpio_rt5506_enable))
 		return 0;
 	else
 		return -EINVAL;
@@ -1045,7 +921,6 @@ static struct file_operations rt5506_fops = {
 	.open = rt5506_open,
 	.release = rt5506_release,
 	.unlocked_ioctl = rt5506_ioctl,
-	.compat_ioctl = rt5506_ioctl,
 };
 
 static struct miscdevice rt5506_device = {
@@ -1058,13 +933,6 @@ int rt5506_probe(struct i2c_client *client, const struct i2c_device_id *id)
 {
 	int ret = 0;
 	int err = 0;
-
-#if MSM8994_LDO_WR
-	if (!msm8994_hph_en_ready()) {
-		pr_err("%s hph_en not ready, deferred probe...\n", __func__);
-		return -EPROBE_DEFER;
-	}
-#endif
 
 	pr_info("rt5506_probe");
 	htc_amp_power_enable(true);
@@ -1090,47 +958,32 @@ int rt5506_probe(struct i2c_client *client, const struct i2c_device_id *id)
 
 	this_client = client;
 
-	
-	if(gpio_is_valid(pdata->gpio_rt55xx_power)) {
-		err = gpio_request(pdata->gpio_rt55xx_power, "hp_pwr_rt5506");
-		if(err)
-			pr_err("%s: power gpio request %d error %d\n",__func__, pdata->gpio_rt55xx_power, err);
-		else {
-			
-			ret = gpio_direction_output(pdata->gpio_rt55xx_power, 1);
-			pr_info("%s: rt5506 power is on\n", __func__);
-		}
-	} else {
-		pr_info("%s: rt5506 power gpio %d is invalid!\n", __func__, pdata->gpio_rt55xx_power);
-	}
-
 	if(1) {
 		unsigned char temp[2];
 
-		err = gpio_request(pdata->gpio_rt55xx_enable, "hp_en_rt5506");
+		err = gpio_request(pdata->gpio_rt5506_enable, "hp_en_rt5506");
 		if(err)
-			pr_err("%s: enable gpio request %d error %d\n",__func__, pdata->gpio_rt55xx_enable, err);
+			pr_err("%s:gpio request %d error %d\n",__func__,pdata->gpio_rt5506_enable,err);
 #if 1
-		pr_info("%s:[1]current gpio %d value %d\n",__func__, pdata->gpio_rt55xx_enable, gpio_get_value(pdata->gpio_rt55xx_enable));
-		ret = gpio_direction_output(pdata->gpio_rt55xx_enable, 1);
+		pr_info("%s:[1]current gpio %d value %d\n",__func__,pdata->gpio_rt5506_enable,gpio_get_value(pdata->gpio_rt5506_enable));
+		ret = gpio_direction_output(pdata->gpio_rt5506_enable, 1);
 
 		if(ret < 0) {
-			pr_err("%s: gpio %d on error %d\n", __func__, pdata->gpio_rt55xx_enable, ret);
+			pr_err("%s: gpio %d on error %d\n", __func__,pdata->gpio_rt5506_enable,ret);
 		}
 #endif
 #if 0
-		gpio_direction_output(pdata->gpio_rt55xx_enable, 0);
-		pr_info("%s:[t-1]current gpio %d value %d\n", __func__, pdata->gpio_rt55xx_enable, gpio_get_value(pdata->gpio_rt55xx_enable));
+		gpio_direction_output(pdata->gpio_rt5506_enable, 0);
+		pr_info("%s:[t-1]current gpio %d value %d\n",__func__,pdata->gpio_rt5506_enable,gpio_get_value(pdata->gpio_rt5506_enable));
 		mdelay(10);
 
-		gpio_direction_output(pdata->gpio_rt55xx_enable, 1);
-		pr_info("%s:[t-2]current gpio %d value %d\n", __func__, pdata->gpio_rt55xx_enable, gpio_get_value(pdata->gpio_rt55xx_enable));
+		gpio_direction_output(pdata->gpio_rt5506_enable, 1);
+		pr_info("%s:[t-2]current gpio %d value %d\n",__func__,pdata->gpio_rt5506_enable,gpio_get_value(pdata->gpio_rt5506_enable));
 #endif
 		mdelay(10);
-		pr_info("%s:[2]current gpio %d value %d\n", __func__, pdata->gpio_rt55xx_enable, gpio_get_value(pdata->gpio_rt55xx_enable));
+		pr_info("%s:[2]current gpio %d value %d\n",__func__,pdata->gpio_rt5506_enable,gpio_get_value(pdata->gpio_rt5506_enable));
 		rt5506_write_reg(0,0x04);
 		mdelay(5);
-#if 0
 		rt5506_write_reg(0x0,0xc0);
 		rt5506_write_reg(0x81,0x30);
 		
@@ -1147,10 +1000,7 @@ int rt5506_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		rt5506_write_reg(0x9c,0x99);
 		rt5506_write_reg(0x9d,0x66);
 		rt5506_write_reg(0x9e,0x99);
-#else
-		check_rt55xx_chip();
-		set_rt55xx_init();
-#endif
+
 		rt5506_write_reg(0x1,0xc7);
 		mdelay(10);
 		ret = rt5506_i2c_read_addr(temp, 0x1);
@@ -1163,7 +1013,7 @@ int rt5506_probe(struct i2c_client *client, const struct i2c_device_id *id)
 		}
 		rt5506Connect = 1;
 
-		gpio_set_value(pdata->gpio_rt55xx_enable, 0);
+		gpio_set_value(pdata->gpio_rt5506_enable, 0);
 
 	}
 
@@ -1230,8 +1080,8 @@ static void rt5506_shutdown(struct i2c_client *client)
 			msleep(1);
 		}
 
-		pr_info("%s: enable gpio %d\n", __func__, pdata->gpio_rt55xx_enable);
-		gpio_set_value(pdata->gpio_rt55xx_enable, 1);
+		pr_info("%s: enable gpio %d\n",__func__,pdata->gpio_rt5506_enable);
+		gpio_set_value(pdata->gpio_rt5506_enable, 1);
 		rt5506_query.gpiostatus = AMP_GPIO_ON;
 		usleep_range(20000,20000);
 	}
@@ -1241,9 +1091,11 @@ static void rt5506_shutdown(struct i2c_client *client)
 
 	high_imp = 0;
 
+	rt5506_query.power_mask = 0;
+
 	if(rt5506_query.gpiostatus == AMP_GPIO_ON) {
-		pr_info("%s: disable gpio %d\n", __func__, pdata->gpio_rt55xx_enable);
-		gpio_set_value(pdata->gpio_rt55xx_enable, 0);
+		pr_info("%s: disable gpio %d\n",__func__,pdata->gpio_rt5506_enable);
+		gpio_set_value(pdata->gpio_rt5506_enable, 0);
 		rt5506_query.gpiostatus = AMP_GPIO_OFF;
 
 		if(rt5506_query.regstatus == REG_PWM_MODE) {
@@ -1301,12 +1153,14 @@ static int __init rt5506_init(void)
 	mutex_init(&rt5506_query.mlock);
 	mutex_init(&rt5506_query.gpiolock);
 	mutex_init(&rt5506_query.actionlock);
-	rt5506_query.rt5506_status = RT55XX_OFF;
-	rt5506_query.hs_qstatus = RT55XX_QUERY_OFF;
+	rt5506_query.rt5506_status = STATUS_OFF;
+	rt5506_query.hs_qstatus = QUERY_OFF;
 	rt5506_query.headsetom = HEADSET_8OM;
-	rt5506_query.curmode = RT55XX_MODE_OFF;
+	rt5506_query.curmode = PLAYBACK_MODE_OFF;
 	rt5506_query.gpiostatus = AMP_GPIO_OFF;
 	rt5506_query.regstatus = REG_AUTO_MODE;
+	rt5506_query.hs_connec = 0;
+	rt5506_query.power_mask = 0;
 	return i2c_add_driver(&rt5506_driver);
 }
 
@@ -1314,14 +1168,8 @@ static void __exit rt5506_exit(void)
 {
 	i2c_del_driver(&rt5506_driver);
 
-	if(pdata->power_reg) {
+	if(pdata->power_reg)
 		rpm_regulator_put(pdata->power_reg);
-	}
-
-	if(rt55xx_config_data_ptr) {
-		kfree(rt55xx_config_data_ptr);
-		rt55xx_config_data_ptr = NULL;
-	}
 }
 
 module_init(rt5506_init);
