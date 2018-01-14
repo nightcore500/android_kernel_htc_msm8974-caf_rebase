@@ -292,10 +292,10 @@ static void tap2wake_presspwr(struct work_struct * tap2wake_presspwr_work)
     if (!mutex_trylock(&pwrkeyworklock))
       return;
     //pr_info("[TP] [T2W] tap2wake_presspwr\n");
-  	input_report_key(tap2wake_pwrdev, KEY_POWER, 1);
+  	input_report_key(tap2wake_pwrdev, KEY_WAKEUP, 1);
   	input_sync(tap2wake_pwrdev);
   	msleep(60);
-  	input_report_key(tap2wake_pwrdev, KEY_POWER, 0);
+  	input_report_key(tap2wake_pwrdev, KEY_WAKEUP, 0);
   	input_sync(tap2wake_pwrdev);
   	msleep(60);
 
@@ -2769,6 +2769,15 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
 					if ((finger_pressed & BIT(i)) == BIT(i)) {
 					if (ts->hall_block_touch_event == 0) {
 						if (ts->htc_event == SYN_AND_REPORT_TYPE_A) {
+#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_TAP2WAKE
+							last_touch_position_x = finger_data[i][0];
+							last_touch_position_y = finger_data[i][1];
+
+							if (scr_suspended == true) {
+								finger_data[i][0] = -10;
+								finger_data[i][1] = -10;
+							}
+#endif
 							if (ts->support_htc_event) {
 								input_report_abs(ts->input_dev, ABS_MT_AMPLITUDE,
 									finger_data[i][3] << 16 | finger_data[i][2]);
@@ -2791,6 +2800,15 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
 								finger_data[i][1]);
 							input_mt_sync(ts->input_dev);
 						} else if (ts->htc_event == SYN_AND_REPORT_TYPE_B) {
+#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_TAP2WAKE
+							last_touch_position_x = finger_data[i][0];
+							last_touch_position_y = finger_data[i][1];
+
+							if (scr_suspended == true) {
+								finger_data[i][0] = -10;
+								finger_data[i][1] = -10;
+							}
+#endif
 							if (ts->support_htc_event) {
 								input_report_abs(ts->input_dev, ABS_MT_AMPLITUDE,
 									finger_data[i][3] << 16 | finger_data[i][2]);
@@ -4518,7 +4536,7 @@ static int __devinit synaptics_ts_probe(
 		goto err_alloc_dev;
 	}
 
-	input_set_capability(tap2wake_pwrdev, EV_KEY, KEY_POWER);
+	input_set_capability(tap2wake_pwrdev, EV_KEY, KEY_WAKEUP);
 	tap2wake_pwrdev->name = "t2w_pwrkey";
 	tap2wake_pwrdev->phys = "t2w_pwrkey/input0";
 
