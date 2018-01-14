@@ -547,6 +547,7 @@ struct msm_i2c_platform_data {
 	int use_gsbi_shared_mode;
 	int keep_ahb_clk_on;
 	void (*msm_i2c_config_gpio)(int iface, int config_type);
+  bool active_only;
 	uint32_t master_id;
 };
 
