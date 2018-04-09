@@ -1,30 +1,35 @@
 /*
-  * Copyright (c) 2012-2013, The Linux Foundation. All rights reserved.
-  *
-  * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
-  *
-  *
-  * Permission to use, copy, modify, and/or distribute this software for
-  * any purpose with or without fee is hereby granted, provided that the
-  * above copyright notice and this permission notice appear in all
-  * copies.
-  *
-  * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
-  * WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
-  * WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
-  * AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL
-  * DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
-  * PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
-  * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
-  * PERFORMANCE OF THIS SOFTWARE.
-*/
+ * Copyright (c) 2012-2013 The Linux Foundation. All rights reserved.
+ *
+ * Previously licensed under the ISC license by Qualcomm Atheros, Inc.
+ *
+ *
+ * Permission to use, copy, modify, and/or distribute this software for
+ * any purpose with or without fee is hereby granted, provided that the
+ * above copyright notice and this permission notice appear in all
+ * copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+ * WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
+ * AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL
+ * DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
+ * PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+ * TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+ * PERFORMANCE OF THIS SOFTWARE.
+ */
+
+/*
+ * This file was originally distributed by Qualcomm Atheros, Inc.
+ * under proprietary terms before Copyright ownership was assigned
+ * to the Linux Foundation.
+ */
+
 /**=========================================================================
 
   \file  limSessionUtils.c
   \brief implementation for lim Session Utility  APIs
   \author Sunit Bhatia
-  
-  Copyright 2008 (c) Qualcomm Technologies, Inc.  All Rights Reserved.
   ========================================================================*/
 
 
@@ -188,20 +193,42 @@ tANI_U8 peIsAnySessionActive(tpAniSirGlobal pMac)
     tANI_U8 i;
     for(i =0; i < pMac->lim.maxBssId; i++)
     {
-        limLog(pMac, LOGE, FL("sessionId: %d  valid = %d "), i, pMac->lim.gpSession[i].valid);
         if(pMac->lim.gpSession[i].valid == TRUE) 
         {
-            limLog(pMac, LOGE, FL("Active sessionId: %d \n BSID: *:%02x:%02x:%02x  opmode = %d bssIdx = %d limMlmState = %d"
-				"limSmeState = %d limAID = %d"), i,
-				pMac->lim.gpSession[i].bssId[3],pMac->lim.gpSession[i].bssId[4],pMac->lim.gpSession[i].bssId[5],
-                pMac->lim.gpSession[i].operMode,pMac->lim.gpSession[i].bssIdx,
-				pMac->lim.gpSession[i].limMlmState,pMac->lim.gpSession[i].limSmeState,pMac->lim.gpSession[i].limAID);
             return(TRUE);
         }
 
     }
     return(FALSE);
 
+}
+
+/*--------------------------------------------------------------------------
+  \brief pePrintActiveSession() - print all the active pesession present .
+
+  This function print all the active pesession present
+
+  \param pMac                   - pointer to global adapter context
+
+  \sa
+  --------------------------------------------------------------------------*/
+
+
+void pePrintActiveSession(tpAniSirGlobal pMac)
+{
+    tANI_U8 i;
+    for(i =0; i < pMac->lim.maxBssId; i++)
+    {
+        if(pMac->lim.gpSession[i].valid == TRUE)
+        {
+            limLog(pMac, LOGE, FL("Active sessionId: %d BSID: "MAC_ADDRESS_STR
+                   "opmode = %d bssIdx = %d"), i,
+                   MAC_ADDR_ARRAY(pMac->lim.gpSession[i].bssId),
+                   pMac->lim.gpSession[i].operMode,
+                   pMac->lim.gpSession[i].bssIdx);
+        }
+    }
+    return;
 }
 
 /*--------------------------------------------------------------------------
@@ -226,7 +253,7 @@ isLimSessionOffChannel(tpAniSirGlobal pMac, tANI_U8 sessionId)
 
     if(sessionId >=  pMac->lim.maxBssId)
     {
-        limLog(pMac, LOGE, FL("Invalid sessionId: %d \n "), sessionId);
+        limLog(pMac, LOGE, FL("Invalid sessionId: %d "), sessionId);
         return FALSE;
     }
 
