@@ -470,7 +470,7 @@ void mmc_stats(struct work_struct *work)
 		long cached;
 		si_meminfo(&mi);
 		cached = global_page_state(NR_FILE_PAGES) -
-			total_swapcache_pages - mi.bufferram;
+			total_swapcache_pages() - mi.bufferram;
 		pr_info("meminfo: total %lu KB, free %lu KB, buffers %lu KB, cached %lu KB \n",
 				K(mi.totalram),
 				K(mi.freeram),
